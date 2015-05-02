@@ -1,0 +1,379 @@
+/*
+ * Copyright (c) 2006 Intel Corporation
+ * All rights reserved.
+ *
+ * This file is distributed under the terms in the attached INTEL-LICENSE     
+ * file. If you do not find these files, copies can be found by writing to
+ * Intel Research Berkeley, 2150 Shattuck Avenue, Suite 1300, Berkeley, CA, 
+ * 94704.  Attention:  Intel License Inquiry.
+ */
+
+/**
+ * Oscilloscope demo application. See README.txt file in this directory.
+ *
+ * @author David Gay
+ */
+#include "Timer.h"
+#include "Oscilloscope.h"
+#include "TestFtsp.h"
+#include "RadioCountToLeds.h"
+
+module OscilloscopeC @safe()
+{
+  uses {
+    interface Boot;
+    interface SplitControl as RadioControl;
+    interface AMSend;// as OcilloscopeSender;
+    interface Receive;// as OcilloscopeReceiver;
+    interface Timer<TMilli> as Timer;
+    interface Read<uint16_t>;
+    interface Leds;
+    //nagamitsu
+    interface GlobalTime<TMilli>;
+    interface TimeSyncInfo;
+    interface Packet;
+    interface PacketTimeStamp<TMilli,uint32_t>;
+    interface Timer<TMilli> as Timer1;
+    //interface AMSend;// as FtspSender;
+    //interface Receive;// as FtspReceiver;
+  }
+}
+implementation
+{
+  message_t sendBuf;
+  bool sendBusy;
+  //nagamitsu
+  message_t msgBuffer;
+  message_t msgBuf;
+  bool sync_up_flag = FALSE;
+  bool sync_under_flag = FALSE;
+
+  /* Current local state - interval, version and accumulated readings */
+  oscilloscope_t local;
+
+  uint8_t reading; /* 0 to NREADINGS */
+  //nagamitsu
+  uint16_t data_tmp; /* To compare datas */
+  uint16_t data_change_tmp; /* To compare present data */
+  uint8_t error_range; /* error data range */
+  uint8_t sync_range; /* data range starting to snyc */
+  uint8_t sync_range1; /* data range starting to snyc */
+  uint32_t globaltime; /* globaltime */
+  uint8_t timer_count; /* timer intarval */
+  uint32_t timer; /* timer */
+  uint16_t data_sync_up_tmp = 0; /* data starting snyc(up) */
+  uint16_t data_sync_under_tmp = 0; /* data starting snyc(under) */
+
+  uint16_t data_[20]; /*To compare datas*/
+
+  /* When we head an Oscilloscope message, we check it's sample count. If
+     it's ahead of ours, we "jump" forwards (set our count to the received
+     count). However, we must then suppress our next count increment. This
+     is a very simple form of "time" synchronization (for an abstract
+     notion of time). */
+  bool suppressCountChange;
+
+  // Use LEDs to report various status issues.
+  void report_problem() { call Leds.led0Toggle(); }
+  void report_sent() { call Leds.led1Toggle(); }
+  void report_received() { call Leds.led2Toggle(); }
+
+  //nagamitsu
+  void syncUp(uint16_t ill, uint16_t pre_ill){
+       //sync flag FLASE
+       if(!sync_up_flag){
+		data_sync_up_tmp = pre_ill;
+		sync_up_flag = TRUE;
+		local.readings[reading-2] = 555;
+	}
+
+	else if(sync_up_flag && (data_sync_up_tmp <= ill - sync_range1 + error_range && data_sync_up_tmp >= ill - sync_range1 - error_range)){
+	     timer = 0;
+	     local.readings[reading-2] = globaltime;
+
+	}
+	//sync flag TRUE. sync start
+	else{
+		//judging
+		/*if(data_sync_up_tmp <= ill - sync_range1 + error_range && data_sync_up_tmp >= ill - sync_range1 - error_range){
+		       timer = 0;
+		       local.readings[reading-1] = timer;
+		       
+		       //sync_flag release
+		       sync_up_flag = FALSE;
+		}*/
+		       //else{
+			sync_up_flag = FALSE;
+		       //}
+	   }
+  }
+
+  void sync_(uint16_t ill){
+       //sync flag FLASE
+       if(sync_up_flag && sync_under_flag){
+       
+		//sync flag TRUE. sync start
+		//judging
+		if(data_sync_up_tmp <= ill + error_range && data_sync_up_tmp >= ill - error_range){
+	       			    timer = 0;
+	       			    local.readings[reading-1] = globaltime;
+				    }
+	}
+ }
+
+  //the same ills count
+  void syncChangeCount(uint16_t ill){
+       		if(ill <= data_change_tmp + error_range && ill >= data_change_tmp + error_range){
+		       	timer_count++;
+		}
+		else{
+			timer_count = 0;
+		}
+		data_change_tmp = ill;
+       }
+
+   void push_data(uint16_t ill){
+     /*data_[19] = data_[18];
+   	data_[18] = data_[17];
+   	data_[17] = data_[16];
+   	data_[16] = data_[15];
+   	data_[15] = data_[14];
+   	data_[14] = data_[13];
+   	data_[13] = data_[12];
+   	data_[12] = data_[11];
+   	data_[11] = data_[10];
+   	data_[10] = data_[9];
+   	data_[9] = data_[8];
+   	data_[8] = data_[7];
+   	data_[7] = data_[6];
+   	data_[6] = data_[5];
+   	data_[5] = data_[4];
+   	data_[4] = data_[3];
+	data_[3] = data_[2];
+	data_[2] = data_[1];
+	data_[1] = data_[0];
+	data_[0] = ill;
+     */	
+	int i=0;
+	for(i = 18;i>=0;i--)
+	  {
+	    data_[i+1] = data_[i];
+	  }
+	data_[0] = ill;
+   }
+
+   void syncUnder(uint16_t ill, uint16_t pre_ill){
+   	if(!sync_under_flag){
+		data_sync_under_tmp = pre_ill;
+		sync_under_flag = TRUE;
+	}
+	else{
+		if(data_sync_under_tmp <= ill + error_range && data_sync_under_tmp >= ill - error_range){
+		}
+		else{
+			sync_under_flag = FALSE;
+		}
+
+	}
+   }
+
+  event void Boot.booted() {
+    local.interval = DEFAULT_INTERVAL;
+    local.id = TOS_NODE_ID;
+    if (call RadioControl.start() != SUCCESS)
+      report_problem();
+
+    //nagamitsu
+    //call Timer1.startPeriodic(1);
+  }
+
+  void startTimer() {
+    call Timer.startPeriodic(local.interval);
+    reading = 0;
+    //nagamitsu
+    call Timer1.startPeriodic(2);
+    data_tmp = 0;
+    data_change_tmp = 0;
+    error_range = 2;
+    sync_range = 10;
+    sync_range1 = 7;
+    timer_count = 0;
+    timer = 0;
+    data_sync_up_tmp = 0;
+    data_sync_under_tmp = 0;
+    globaltime = 0;
+    for(timer_count = 0;timer_count < 20;timer_count++) data_[timer_count] = 0;
+    timer_count=0;
+  }
+
+  event void RadioControl.startDone(error_t error) {
+    startTimer();
+  }
+
+  event void RadioControl.stopDone(error_t error) {
+  }
+
+/*  event message_t* *//*OcilloscopeReceiver*//*Receive.receive(message_t* msg, void* payload, uint8_t len) {
+    oscilloscope_t *omsg = payload;
+
+    report_received();
+*/
+    /* If we receive a newer version, update our interval. 
+       If we hear from a future count, jump ahead but suppress our own change
+    */
+/*    if (omsg->version > local.version)
+      {
+	local.version = omsg->version;
+	local.interval = omsg->interval;
+	startTimer();
+      }
+    if (omsg->count > local.count)
+      {
+	local.count = omsg->count;
+	suppressCountChange = TRUE;
+      }
+      return msg;
+      }
+*/
+      //nagamitsu
+      event message_t* Receive.receive(message_t* msg, void* payload, uint8_t len){
+        call Leds.led2Toggle();
+      if (!sendBusy && call PacketTimeStamp.isValid(msg)) {
+            radio_count_msg_t* rcm = (radio_count_msg_t*)call Packet.getPayload(msg, sizeof(radio_count_msg_t));
+            test_ftsp_msg_t* report = (test_ftsp_msg_t*)call Packet.getPayload(&msgBuf, sizeof(test_ftsp_msg_t));
+
+            uint32_t rxTimestamp = call PacketTimeStamp.timestamp(msg);
+
+            report->src_addr = TOS_NODE_ID;
+            report->counter = rcm->counter;
+            report->local_rx_timestamp = rxTimestamp;
+            report->is_synced = call GlobalTime.local2Global(&rxTimestamp);
+            report->global_rx_timestamp = rxTimestamp;
+            report->skew_times_1000000 = (uint32_t)call TimeSyncInfo.getSkew()*1000000UL;
+            report->ftsp_root_addr = call TimeSyncInfo.getRootID();
+            report->ftsp_seq = call TimeSyncInfo.getSeqNum();
+            report->ftsp_table_entries = call TimeSyncInfo.getNumEntries();
+	    
+	    //nagamitsu adds
+	    globaltime = report->global_rx_timestamp;
+
+	    if(len == sizeof(radio_count_msg_t)) call Leds.led0Toggle();
+	    
+	    /*            if (call AMSend.send(AM_BROADCAST_ADDR, &msgBuf, sizeof(test_ftsp_msg_t)) == SUCCESS) {
+              sendBusy = TRUE;
+	      //locked = TRUE;
+	      }*/
+        }
+
+    return msg;
+  }
+
+  /* At each sample period:
+     - if local sample buffer is full, send accumulated samples
+     - read next sample
+  */
+  event void Timer.fired() {
+    if (reading == NREADINGS)
+      {
+	if (!sendBusy && sizeof local <= call /*OcilloscopeSender*/AMSend.maxPayloadLength())
+	  {
+	    // Don't need to check for null because we've already checked length
+	    // above
+	    memcpy(call /*OcilloscopeSender*/AMSend.getPayload(&sendBuf, sizeof(local)), &local, sizeof local);
+	    if (call /*OcilloscopeSender*/AMSend.send(AM_BROADCAST_ADDR, &sendBuf, sizeof local) == SUCCESS)
+	      sendBusy = TRUE;
+	  }
+	if (!sendBusy)
+	  report_problem();
+
+	reading = 0;
+	/* Part 2 of cheap "time sync": increment our count if we didn't
+	   jump ahead. */
+	if (!suppressCountChange)
+	  local.count++;
+	suppressCountChange = FALSE;
+      }
+    if (call Read.read() != SUCCESS)
+      report_problem();
+  }
+
+  //nagamitsu
+  event void Timer1.fired(){
+  }
+
+ /* event void OcilloscopeSender.sendDone(message_t* msg, error_t error) {
+    if (error == SUCCESS)
+      report_sent();
+    else
+      report_problem();
+
+    sendBusy = FALSE;
+  }*/
+
+  //nagamitsu
+  event void AMSend.sendDone(message_t* msg, error_t error) {
+    if (error == SUCCESS)
+      report_sent();
+    else
+      report_problem();
+
+      sendBusy = FALSE;
+    //locked = FALSE;
+  }
+
+  event void Read.readDone(error_t result, uint16_t data) {
+    if (result != SUCCESS)
+      {
+	data = 0xffff;
+	report_problem();
+      }
+    if (reading < NREADINGS){
+      local.readings[reading++] = data;//globaltime;//data;
+      local.readings[reading++] = call /*GlobalTime./*getLocalTime();*/GlobalTime.local2Global(&globaltime);
+       push_data(data);
+      }
+
+      //nagamitsu
+      //data correct
+      if (data != 0xffff){
+ 	 //if(data_[0] <= data_[1] + sync_range1 + error_range && data_[0] >= data_[1] + sync_range1 - error_range){}
+	 //If(Data_[0] <= data_[2] + sync_range1 + error_range && data_[0] >= data_[2] + sync_range1 - error_range){}
+
+	//sync period is 100 ms
+	 /*if(data_[0] <= data_[3] + sync_range1 + error_range && data_[0] >= data_[3] + sync_range1 - error_range){
+	   //if(timer_count==0){
+	     syncUp(data_[0],data_[3]);
+	     //timer_count++;
+	   //}
+	   }*/
+
+	//sync period is 10 ms
+	 if(data_[0] <= data_[14] + sync_range1 + error_range && data_[0] >= data_[14] + sync_range1 - error_range){
+	   syncUp(data_[0],data_[14]);
+	   }
+
+      	 //data does not change
+      	 if(data <= data_tmp + /*error_range*/2 && data >= data_tmp - /*error_range*/2){
+	 	       //local.readings[reading-1] = data_tmp;
+	 }
+	 //data is up to synchronize range
+	 /*else if(data <= data_tmp + sync_range1 + error_range && data >= data_tmp + sync_range1 - error_range){
+	      syncUp(data,data_tmp);
+	            //local.readings[reading-1]=555;
+	 }*/
+
+	 //data is down to synchronize range
+	 else if(data <= data_tmp - sync_range + error_range && data >= data_tmp - sync_range - error_range){
+	      //syncUnder(data, data_tmp);
+	 }
+	
+	//finally data copy to data_tmp
+	data_tmp = data;
+	//time incriment
+	timer = timer + local.interval;
+
+      }
+   }
+      
+
+}
