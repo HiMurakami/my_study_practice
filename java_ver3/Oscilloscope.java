@@ -62,7 +62,7 @@ public class Oscilloscope implements MessageListener
                         Date date1 = new Date();
                         SimpleDateFormat DF = new SimpleDateFormat("yyyy,MM,dd,HH,mm,ss.SSS");
                         ill1 = dataint;
-			File file =new File("new2.txt");
+			File file =new File("git1.txt");
 			FileWriter filewriter=new FileWriter(file,true);
 			//filewriter.write(year+","+month+","+day+","+hour+","+minute+","+second+","+dataint[0]+","+ill1+"\r\n");
 			for(int i=0;i<dataint.length;i++){
